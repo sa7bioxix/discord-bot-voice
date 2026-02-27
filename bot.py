@@ -27,16 +27,16 @@ client_ai = OpenAI(api_key=OPENAI_API_KEY)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 conversation_history = {}
-listening_channels = {}
-voice_clients = {}
+active_calls = {}
 
 def get_response(user_id: int, user_message: str) -> str:
     if user_id not in conversation_history:
         conversation_history[user_id] = [
-            {"role": "system", "content": "You are a helpful and friendly AI assistant. Keep responses concise, fun, and natural."}
+            {"role": "system", "content": "You are a helpful and friendly AI assistant. Keep responses concise and fun."}
         ]
     
     conversation_history[user_id].append({"role": "user", "content": user_message})
@@ -51,23 +51,9 @@ def get_response(user_id: int, user_message: str) -> str:
     conversation_history[user_id].append({"role": "assistant", "content": bot_response})
     
     if len(conversation_history[user_id]) > 20:
-        conversation_history[user_id] = [
-            conversation_history[user_id][0]
-        ] + conversation_history[user_id][-19:]
+        conversation_history[user_id] = [conversation_history[user_id][0]] + conversation_history[user_id][-19:]
     
     return bot_response
-
-def transcribe_audio(audio_path: str) -> str:
-    try:
-        with open(audio_path, "rb") as audio_file:
-            transcript = client_ai.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file
-            )
-        return transcript.text.strip()
-    except Exception as e:
-        logging.error(f"Transcription error: {e}")
-        return ""
 
 def synthesize_to_file(text: str) -> Path:
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
@@ -106,6 +92,69 @@ async def speak_response(voice_client, text):
 async def on_ready():
     logging.info(f"Logged in as {bot.user}")
 
+@bot.command(name="call")
+async def call(ctx, member: discord.Member):
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("Join a voice channel first!")
+        return
+    
+    if not member.voice or not member.voice.channel:
+        await ctx.send(f"{member.name} is not in a voice channel!")
+        return
+    
+    target_channel = member.voice.channel
+    
+    await ctx.send(f"Calling {member.name}... 📞")
+    
+    voice_client = await ctx.author.voice.channel.connect()
+    
+    await speak_response(voice_client, f"Hello! {ctx.author.name} is calling you!")
+    
+    active_calls[ctx.guild.id] = {
+        "caller": ctx.author,
+        "callee": member,
+        "channel": target_channel,
+        "voice_client": voice_client
+    }
+    
+    await ctx.send(f"Connected to {member.name} in {target_channel.name}! Use !hangup to end the call.")
+
+@bot.command(name="hangup")
+async def hangup(ctx):
+    guild_id = ctx.guild.id
+    
+    if guild_id in active_calls:
+        call_info = active_calls[guild_id]
+        if call_info["voice_client"]:
+            await call_info["voice_client"].disconnect()
+        del active_calls[guild_id]
+        await ctx.send("Call ended 👋")
+    else:
+        await ctx.send("No active call.")
+
+@bot.command(name="accept")
+async def accept(ctx):
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("Join a voice channel first!")
+        return
+    
+    for guild_id, call_info in active_calls.items():
+        if call_info["callee"].id == ctx.author.id:
+            await ctx.send("Accepting call...")
+            
+            caller_channel = call_info["caller"].voice.channel
+            voice_client = await caller_channel.connect()
+            
+            await speak_response(voice_client, f"{ctx.author.name} joined the call!")
+            
+            call_info["voice_client"] = voice_client
+            active_calls[guild_id]["caller_joined"] = True
+            
+            await ctx.send("Connected to the call! Use !hangup to leave.")
+            return
+    
+    await ctx.send("No incoming call found.")
+
 @bot.command(name="listen")
 async def listen(ctx):
     if not ctx.author.voice or not ctx.author.voice.channel:
@@ -114,23 +163,12 @@ async def listen(ctx):
     
     channel_id = ctx.author.voice.channel.id
     
-    if listening_channels.get(channel_id, False):
-        await ctx.send("Already listening!")
-        return
-    
-    listening_channels[channel_id] = True
-    
     voice_client = await ctx.author.voice.channel.connect()
-    voice_clients[ctx.guild.id] = voice_client
-    
-    await ctx.send(f"👂 Listening! Say something and I'll respond with voice!")
+    await ctx.send(f"👂 Listening in {ctx.author.voice.channel.name}!")
 
 @bot.command(name="unlisten")
 async def unlisten(ctx):
     if ctx.voice_client and ctx.voice_client.is_connected():
-        channel_id = ctx.voice_client.channel.id
-        if channel_id in listening_channels:
-            listening_channels[channel_id] = False
         await ctx.voice_client.disconnect()
         await ctx.send("Stopped listening 👋")
 
@@ -146,9 +184,6 @@ async def join_voice(ctx):
 @bot.command(name="leave")
 async def leave_voice(ctx):
     if ctx.voice_client and ctx.voice_client.is_connected():
-        channel_id = ctx.voice_client.channel.id
-        if channel_id in listening_channels:
-            listening_channels[channel_id] = False
         await ctx.voice_client.disconnect()
         await ctx.send("Disconnected 👋")
 
@@ -198,7 +233,6 @@ async def speak(ctx, *, text: str):
     if ctx.voice_client.is_playing():
         ctx.voice_client.stop()
 
-    await ctx.send("🎙️")
     await speak_response(ctx.voice_client, text)
 
 @bot.command(name="stop")
