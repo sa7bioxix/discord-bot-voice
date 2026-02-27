@@ -1,0 +1,18 @@
+# Python virtual environments
+venv/
+.venv/
+myenv/
+
+# Environment variables
+.env
+
+# Bytecode / cache
+__pycache__/
+*.pyc
+
+# Audio artifacts
+*.mp3
+*.wav
+*.ogg
+
+tmp/
